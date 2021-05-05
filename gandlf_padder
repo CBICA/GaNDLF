@@ -1,0 +1,134 @@
+#!usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import os, argparse, sys
+from pathlib import Path
+from datetime import date
+import numpy as np
+import SimpleITK as sitk
+
+from GANDLF.utils import parseTrainingCSV
+from GANDLF.parseConfig import parseConfig
+
+import torchio
+
+def main():
+  copyrightMessage = 'Contact: software@cbica.upenn.edu\n\n' + 'This program is NOT FDA/CE approved and NOT intended for clinical use.\nCopyright (c) ' + str(date.today().year) + ' University of Pennsylvania. All rights reserved.' 
+
+  parser = argparse.ArgumentParser(prog='GANDLF_Padder', formatter_class=argparse.RawTextHelpFormatter, description = "Generate training/inference data which are padded to reduce RAM footprint during training.\n\n" + copyrightMessage)
+  parser.add_argument('-config', type=str, help = 'The configuration file (contains all the information related to the training/inference session), this is read from \'output\' during inference', required=True)
+  parser.add_argument('-data', type=str, help = 'Data csv file that is used for training/inference; can also take a comma-separate training-validatation pre-split CSV', required=True)
+  parser.add_argument('-output', type=str, help = 'Output directory to save intermediate files and model weights', required=True)
+  parser.add_argument('-labelPad', type=str, default='constant', help = 'Padding type for labels, defaults to \'constant:0\' [full list: https://numpy.org/doc/stable/reference/generated/numpy.pad.html]', required=False)
+      
+  args = parser.parse_args()
+
+  Path(args.output).mkdir(parents=True, exist_ok=True)
+
+  # read the csv
+  dataframe, headers = parseTrainingCSV(args.data, train=False) # don't care if the dataframe gets shuffled or not
+  parameters = parseConfig(args.config)
+
+  # csv headers
+  channelHeaders = headers['channelHeaders']
+  labelHeader = headers['labelHeader']
+  subjectIDHeader = headers['subjectIDHeader']
+  psize = parameters['psize']
+
+  if 'verbose' in parameters:
+    verbose = parameters['verbose']
+  else:
+    verbose = False
+  
+  num_row, num_col = dataframe.shape
+  dataframe.columns = range(0,num_col)
+  dataframe.index = range(0,num_row)
+  
+  for patient in range(num_row):
+    # We need this dict for storing the meta data for each subject
+    # such as different image modalities, labels, any other data
+    subject_dict = {}
+    subject_dict_to_write = {}
+    subject_dict_label = {}
+    subject_dict['subject_id'] = dataframe[subjectIDHeader][patient]
+    subject_dict_to_write['subject_id'] = subject_dict['subject_id']
+
+    current_output_dir = os.path.join(args.output,subject_dict['subject_id'])
+    Path(current_output_dir).mkdir(parents=True, exist_ok=True)
+
+    skip_subject = False
+    # iterating through the channels/modalities/timepoints of the subject
+    for channel in channelHeaders:
+      # sanity check for malformed csv
+      if not os.path.isfile(str(dataframe[channel][patient])):
+          skip_subject = True
+      # assigning the dict key to the channel
+      subject_dict[str(channel)] = torchio.Image(str(dataframe[channel][patient]), type=torchio.INTENSITY)
+
+    if labelHeader is not None:
+      if not os.path.isfile(str(dataframe[labelHeader][patient])):
+          skip_subject = True
+      subject_dict_label['label'] = torchio.Image(str(dataframe[labelHeader][patient]), type=torchio.LABEL)
+
+    # skip subject the condition was tripped
+    if not skip_subject:
+      if verbose:
+        print('Started padding images for \'' + subject_dict['subject_id'] + '\'', flush=True)
+      # Initializing the subject object using the dict
+      subject = torchio.Subject(subject_dict)
+      subject_label = torchio.Subject(subject_dict_label)
+
+      # apply a different padding mode to image and label (so that label information is not duplicated)  
+      psize_pad = list(np.asarray(np.ceil(np.divide(psize,2)), dtype=int))
+      padder = torchio.transforms.Pad(psize_pad, padding_mode = 'symmetric') # for modes: https://numpy.org/doc/stable/reference/generated/numpy.pad.html
+      subject = padder(subject)
+
+      if labelHeader is not None:
+        if verbose:
+          print('Applying specialized padding to label image and then generating crops based on it', flush=True)
+        padder_label = torchio.transforms.Pad(psize_pad, padding_mode = args.labelPad) # for modes: https://numpy.org/doc/stable/reference/generated/numpy.pad.html
+        subject_label = padder_label(subject_label)
+
+        # now combine the label with the original subject dictionary to do sampling 
+        subject['label'] = subject_label['label']
+        sampler = torchio.data.LabelSampler(psize)
+        generator = sampler(subject, num_patches=1)
+        for patch in generator:
+          for channel in channelHeaders:
+            subject_dict_to_write[str(channel)] = patch[str(channel)]
+          
+          subject_dict_to_write['label'] = patch['label']
+      else:
+        subject_dict_to_write = subject
+
+    if verbose:
+      print('Writing padded images for \'' + subject_dict['subject_id'] + '\'', flush=True)
+    # write new images
+    for key in channelHeaders:
+      pth = Path(subject_dict_to_write[str(key)]['path'])
+      image_to_write = subject_dict_to_write[str(key)].as_sitk()
+      image_file = os.path.join(current_output_dir, pth.name)
+      if not os.path.isfile(image_file):
+        if verbose:
+          print('Writing',image_file)
+        try:
+          sitk.WriteImage(image_to_write, image_file)
+        except:
+          print('Could not write:',image_file, file = sys.stderr, flush=True)
+
+    # now try to write the label
+    if 'label' in subject_dict_to_write:
+      pth = Path(subject_dict_to_write['label']['path'])
+      image_to_write = subject_dict_to_write['label'].as_sitk()
+      image_file = os.path.join(current_output_dir, pth.name)
+      if not os.path.isfile(image_file):
+        if verbose:
+          print('Writing',image_file)
+        try:
+          sitk.WriteImage(image_to_write, image_file)
+        except:
+          print('Could not write:',image_file, file = sys.stderr, flush=True)
+
+# main function
+if __name__ == '__main__':
+  main()

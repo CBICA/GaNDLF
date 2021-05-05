@@ -116,14 +116,8 @@ def accuracy(output, label, params):
         DESCRIPTION.
 
     """
-    # Reminder to add thresholding as a possible parameter in config
-    if params["thresh"] is not None:
-        thresh = params["thresh"]
-    else:
-        thresh = 0.5
-
-    if thresh is not None:
-        output = (output >= thresh).float()
+    if params['metrics']['accuracy']['threshold'] is not None:
+        output = (output >= params['metrics']['accuracy']['threshold']).float()
     correct = (output == label).float().sum()
     return correct / len(label)
 
@@ -191,6 +185,10 @@ def fetch_metric(metric_name):
         The function to compute the metric
 
     """
+    # if dict, only pick the first value
+    if isinstance(metric_name, dict):
+        metric_name = list(metric_name)[0]
+
     if (metric_name).lower() == "dice":
         metric_function = multi_class_dice
     elif (metric_name).lower() == "accuracy":

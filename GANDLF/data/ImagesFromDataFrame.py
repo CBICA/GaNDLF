@@ -1,4 +1,4 @@
-import torch
+import os
 import numpy as np
 from functools import partial
 
@@ -11,11 +11,9 @@ from torchio.transforms import (OneOf, RandomMotion, RandomGhosting, RandomSpike
 from torchio import Image, Subject
 import SimpleITK as sitk
 # from GANDLF.utils import resize_image
-from GANDLF.preprocessing import (NonZeroNormalizeOnMaskedRegion, CropExternalZeroplanes,
-                                  resize_image_resolution, threshold_intensities,
+from GANDLF.preprocessing import (NonZeroNormalizeOnMaskedRegion, CropExternalZeroplanes, apply_resize, threshold_intensities,
                                   tensor_rotate_180, tensor_rotate_90, clip_intensities,
-                                  normalize_imagenet, normalize_standardize,
-                                  normalize_div_by_255)
+                                  normalize_imagenet, normalize_standardize, normalize_div_by_255, get_tensor_for_dataloader)
 
 import copy, sys
 
@@ -29,16 +27,21 @@ def affine(p = 1):
     return RandomAffine(p=p)
 
 def elastic(patch_size = None, p = 1):
+    
     if patch_size is not None:
-        num_controls = patch_size
-        max_displacement = np.divide(patch_size, 10)
-        if patch_size[-1] == 1:
+        # define the control points and swap axes for augmentation
+        num_controls = []
+        for i in range(len(patch_size)):
+            if patch_size[i] != 1: # this is a 2D case
+                num_controls.append(max(round(patch_size[i] / 10), 4)) # always at least have 4
+        max_displacement = np.divide(num_controls, 10)
+        if num_controls[-1] == 1:
             max_displacement[-1] = 0.1 # ensure maximum displacement is never grater than patch size
     else:
         # use defaults defined in torchio
         num_controls = 7 
         max_displacement = 7.5
-    return RandomElasticDeformation(max_displacement = max_displacement, p = p)
+    return RandomElasticDeformation(num_control_points = num_controls, max_displacement = max_displacement, p = p)
 
 def swap(patch_size = 15, p=1):
     return RandomSwap(patch_size=patch_size, num_iterations=100, p=p)
@@ -158,47 +161,41 @@ def ImagesFromDataFrame(dataframe,
     
     sampler = sampler.lower() # for easier parsing
 
-    # define the control points and swap axes for augmentation
-    augmentation_patchAxesPoints = copy.deepcopy(patch_size)
-    for i in range(len(augmentation_patchAxesPoints)):
-        augmentation_patchAxesPoints[i] = max(round(augmentation_patchAxesPoints[i] / 10), 1) # always at least have 1
-
-    # initialize resizeCheck if not present
-    if not('resizeCheck' in preprocessing):
-        preprocessing['resizeCheck'] = False
-
+    resize_images = False
+    # if resize has been defined but resample is not (or is none)
+    if not(preprocessing is None) and ('resize' in preprocessing):
+        if (preprocessing['resize'] is not None):
+            if not('resample' in preprocessing):
+                resize_images = True
+            else:
+                print('WARNING: \'resize\' is ignored as \'resample\' is defined under \'data_processing\', this will be skipped', file = sys.stderr)
     # iterating through the dataframe
     for patient in range(num_row):
         # We need this dict for storing the meta data for each subject
         # such as different image modalities, labels, any other data
         subject_dict = {}
         subject_dict['subject_id'] = dataframe[subjectIDHeader][patient]
+        skip_subject = False
         # iterating through the channels/modalities/timepoints of the subject
         for channel in channelHeaders:
+            # sanity check for malformed csv
+            if not os.path.isfile(str(dataframe[channel][patient])):
+                skip_subject = True
             # assigning the dict key to the channel
             if not in_memory:
                 subject_dict[str(channel)] = Image(str(dataframe[channel][patient]), type=torchio.INTENSITY)
             else:
                 img = sitk.ReadImage(str(dataframe[channel][patient]))
-                array = np.expand_dims(sitk.GetArrayFromImage(img), axis=0)
-                print("Image shape : ", img.shape, flush=True)
-                print("Array shape : ", array.shape, flush=True)
-                subject_dict[str(channel)] = Image(tensor=array, type=torchio.INTENSITY, path=dataframe[channel][patient])
+                img_tensor = get_tensor_for_dataloader(img)
+                subject_dict[str(channel)] = Image(tensor=img_tensor, type=torchio.INTENSITY, path=dataframe[channel][patient])
+            
+            # if resize is requested, the perform per-image resize with appropriate interpolator
+            if resize_images:
+                img = subject_dict[str(channel)].as_sitk()
+                img_resized = apply_resize(img, preprocessing_params=preprocessing)
+                img_tensor = get_tensor_for_dataloader(img_resized)
+                subject_dict[str(channel)] = Image(tensor=img_tensor, type=torchio.INTENSITY, path=dataframe[channel][patient])
 
-            # if resize has been defined but resample is not (or is none)
-            if not preprocessing['resizeCheck']:
-                if not(preprocessing is None) and ('resize' in preprocessing):
-                    if (preprocessing['resize'] is not None):
-                        preprocessing['resizeCheck'] = True
-                        if not('resample' in preprocessing):
-                            preprocessing['resample'] = {}
-                            if not('resolution' in preprocessing['resample']):
-                                preprocessing['resample']['resolution'] = resize_image_resolution(subject_dict[str(channel)].as_sitk(), preprocessing['resize'])
-                        else:
-                            print('WARNING: \'resize\' is ignored as \'resample\' is defined under \'data_processing\', this will be skipped', file = sys.stderr)
-                else:
-                    preprocessing['resizeCheck'] = True
-        
         # # for regression
         # if predictionHeaders:
         #     # get the mask
@@ -206,13 +203,21 @@ def ImagesFromDataFrame(dataframe,
         #         sys.exit('The \'class_list\' parameter has been defined but a label file is not present for patient: ', patient)
 
         if labelHeader is not None:
+            if not os.path.isfile(str(dataframe[labelHeader][patient])):
+                skip_subject = True
             if not in_memory:
                 subject_dict['label'] = Image(str(dataframe[labelHeader][patient]), type=torchio.LABEL)
             else:
                 img = sitk.ReadImage(str(dataframe[labelHeader][patient]))
-                array = np.expand_dims(sitk.GetArrayFromImage(img), axis=0)
-                subject_dict['label'] = Image(tensor=array, type=torchio.LABEL, path=dataframe[labelHeader][patient])
+                img_tensor = get_tensor_for_dataloader(img)
+                subject_dict['label'] = Image(tensor=img_tensor, type=torchio.LABEL, path=dataframe[labelHeader][patient])
 
+            # if resize is requested, the perform per-image resize with appropriate interpolator
+            if resize_images:
+                img = sitk.ReadImage(str(dataframe[labelHeader][patient]))
+                img_resized = apply_resize(img, preprocessing_params=preprocessing, interpolator=sitk.sitkNearestNeighbor)
+                img_tensor = get_tensor_for_dataloader(img_resized)
+                subject_dict['label'] = Image(tensor=img_tensor, type=torchio.LABEL, path=dataframe[channel][patient])
             
             subject_dict['path_to_metadata'] = str(dataframe[labelHeader][patient])
         else:
@@ -226,17 +231,19 @@ def ImagesFromDataFrame(dataframe,
             subject_dict['value_' + str(valueCounter)] = np.array(dataframe[values][patient])
             valueCounter = valueCounter + 1
         
-        # Initializing the subject object using the dict
-        subject = Subject(subject_dict)
+        # skip subject the condition was tripped
+        if not skip_subject:
+            # Initializing the subject object using the dict
+            subject = Subject(subject_dict)
 
-        # padding image, but only for label sampler, because we don't want to pad for uniform
-        if 'label' in sampler or 'weight' in sampler:
-            patch_size_pad = list(np.asarray(np.round(np.divide(patch_size,2)), dtype=int))
-            padder = Pad(patch_size_pad, padding_mode = 'symmetric') # for modes: https://numpy.org/doc/stable/reference/generated/numpy.pad.html
-            subject = padder(subject)
+            # # padding image, but only for label sampler, because we don't want to pad for uniform
+            # if 'label' in sampler or 'weight' in sampler:
+            #     psize_pad = list(np.asarray(np.ceil(np.divide(psize,2)), dtype=int))
+            #     padder = Pad(psize_pad, padding_mode = 'symmetric') # for modes: https://numpy.org/doc/stable/reference/generated/numpy.pad.html
+            #     subject = padder(subject)
 
-        # Appending this subject to the list of subjects
-        subjects_list.append(subject)
+            # Appending this subject to the list of subjects
+            subjects_list.append(subject)
 
     augmentation_list = []
 
@@ -282,7 +289,7 @@ def ImagesFromDataFrame(dataframe,
                     for axis in augmentations[aug]['axis']:
                         augmentation_list.append(global_augs_dict[aug](axis=axis, p=augmentations[aug]['probability']))
                 elif aug in ['swap', 'elastic']:
-                    actual_function = global_augs_dict[aug](patch_size=augmentation_patchAxesPoints, p=augmentations[aug]['probability'])
+                    actual_function = global_augs_dict[aug](patch_size=patch_size, p=augmentations[aug]['probability'])
                 elif aug == 'blur':
                     actual_function = global_augs_dict[aug](std=augmentations[aug]['std'], p=augmentations[aug]['probability'])
                 elif aug == 'noise':

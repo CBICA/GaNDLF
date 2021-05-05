@@ -126,7 +126,7 @@ def train_network(model, train_dataloader, optimizer, params):
     total_epoch_train_loss = 0
     total_epoch_train_metric = {}
     average_epoch_train_metric = {}
-
+    
     for metric in params["metrics"]:
         total_epoch_train_metric[metric] = 0
 

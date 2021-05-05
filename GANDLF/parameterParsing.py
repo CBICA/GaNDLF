@@ -220,8 +220,7 @@ def get_model(
         divisibilityCheck_patch = False
         divisibilityCheck_baseFilter = False
         features_for_classifier = (
-            batch_size
-            * num_final_features
+            num_final_features
             * np.prod(patch_size_altered // 2 ** m_counter)
         )
         layers = make_layers(vgg_config, num_dimensions, num_channels, batch_norm=batch_norm)

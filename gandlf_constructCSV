@@ -1,11 +1,7 @@
 #!usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import os
-import sys
-import argparse
-import subprocess
-from pathlib import Path
+import os, argparse
 from datetime import date
 from GANDLF.utils import writeTrainingCSV
 

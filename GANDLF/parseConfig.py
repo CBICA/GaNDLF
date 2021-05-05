@@ -131,6 +131,16 @@ def parseConfig(config_file_path, version_check = True):
     loss_function = params['loss_function']
   params['loss_function'] = loss_function
 
+  if 'metrics' in params:
+    if 'accuracy' in params['metrics']:      
+      if 'threshold' in params['metrics']['accuracy']:
+        pass
+      else:
+        params['metrics']['accuracy']['threshold'] = 0.5
+      
+  else:
+    sys.exit('The key \'metrics\' needs to be defined')
+
   if 'opt' in params:
     opt = str(params['opt'])
   else:
@@ -393,5 +403,5 @@ def parseConfig(config_file_path, version_check = True):
     pass
   else:
     params['verbose'] = False
-  
+
   return params

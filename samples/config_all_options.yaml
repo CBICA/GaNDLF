@@ -62,14 +62,16 @@ weighted_loss: True
 #  }
 # Which optimizer do you want to use - adam/sgd
 opt: adam
-# this parameter controls the nested training process
-# performs randomized k-fold cross-validation
-# split is performed using sklearn's KFold method
-# for single fold run, use '-' before the fold number
+# this parameter controls the validation information collected during the training process
+# currently implemented: dice, accuracy (this can be a dict containing value for threshold), mse
 metrics:
 {
     'dice'
 }
+# this parameter controls the nested training process
+# performs randomized k-fold cross-validation
+# split is performed using sklearn's KFold method
+# for single fold run, use '-' before the fold number
 nested_training:
   {
     testing: 5, # this controls the testing data splits for final model evaluation; use '1' if this is to be disabled

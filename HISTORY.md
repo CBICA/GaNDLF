@@ -1,5 +1,7 @@
 ## 0.0.9
+
 - Refactoring the training and inference code
+- Added offline mechanism to generate padded images to improve training RAM requirements
 
 ## 0.0.8
 
